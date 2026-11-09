@@ -1,0 +1,108 @@
+name: Build All IN ONE Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - english-bilingual
+
+permissions:
+  contents: write
+
+concurrency:
+  group: all-in-one-android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+
+jobs:
+  android:
+    name: Android ARM64 debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Prepare Android SDK and NDK
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          "$SDKM" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+          echo "NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Install Rust Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: android-arm64-debug
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Android project
+        run: pnpm tauri android init --ci
+
+      - name: Build debug APK (debug key, no private keystore required)
+        run: pnpm tauri android build --apk --target aarch64 --debug --ci
+
+      - name: Collect APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          mkdir -p artifacts
+          APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          cp "$APK" "artifacts/All_IN_ONE_${VERSION}_arm64_debug.apk"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ls -lh artifacts
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: All-IN-ONE-Android-ARM64-debug
+          path: artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: all-in-one-android-v${{ steps.apk.outputs.version }}-${{ github.run_number }}
+          name: All IN ONE Android test build ${{ steps.apk.outputs.version }} #${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          generate_release_notes: false
+          body: |
+            All IN ONE Android ARM64 testing build.
+
+            This APK is debug-signed by GitHub Actions and does not require a private signing key.
+            It is intended for direct installation and testing, not Google Play publishing.
+          files: artifacts/*.apk
