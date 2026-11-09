@@ -18,7 +18,7 @@ env:
 
 jobs:
   android:
-    name: Android ARM64 debug APK
+    name: Android ARM64 optimized APK
     runs-on: ubuntu-latest
     steps:
       - name: Checkout branch
@@ -60,7 +60,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          key: android-arm64-debug
+          key: android-arm64-release
 
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
@@ -68,26 +68,43 @@ jobs:
       - name: Generate Android project
         run: pnpm tauri android init --ci
 
-      - name: Build debug APK (debug key, no private keystore required)
-        run: pnpm tauri android build --apk --target aarch64 --debug --ci
+      - name: Build optimized release APK
+        run: pnpm tauri android build --apk --target aarch64 --ci
 
-      - name: Collect APK
+      - name: Sign release APK with temporary test key
         id: apk
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          mkdir -p artifacts
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/36.0.0"
           APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
           test -n "$APK"
-          cp "$APK" "artifacts/All_IN_ONE_${VERSION}_arm64_debug.apk"
+
+          mkdir -p artifacts
+          KEYSTORE="$RUNNER_TEMP/all-in-one-test.keystore"
+          ALIGNED="$RUNNER_TEMP/all-in-one-aligned.apk"
+          PASSWORD="allinone-temporary-test-key"
+
+          keytool -genkeypair -noprompt -keystore "$KEYSTORE" \
+            -storepass "$PASSWORD" -keypass "$PASSWORD" \
+            -alias allinone-test -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=All IN ONE Testing"
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$APK" "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KEYSTORE" --ks-key-alias allinone-test \
+            --ks-pass "pass:$PASSWORD" --key-pass "pass:$PASSWORD" \
+            --out "artifacts/All_IN_ONE_${VERSION}_arm64.apk" "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "artifacts/All_IN_ONE_${VERSION}_arm64.apk"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          rm -f "$KEYSTORE" "$ALIGNED"
           ls -lh artifacts
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: All-IN-ONE-Android-ARM64-debug
+          name: All-IN-ONE-Android-ARM64
           path: artifacts/*.apk
           if-no-files-found: error
           retention-days: 30
@@ -96,13 +113,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: all-in-one-android-v${{ steps.apk.outputs.version }}-${{ github.run_number }}
-          name: All IN ONE Android test build ${{ steps.apk.outputs.version }} #${{ github.run_number }}
+          name: "All IN ONE Android test build ${{ steps.apk.outputs.version }} #${{ github.run_number }}"
           target_commitish: ${{ github.sha }}
           prerelease: true
           generate_release_notes: false
           body: |
-            All IN ONE Android ARM64 testing build.
+            All IN ONE Android ARM64 optimized testing build.
 
-            This APK is debug-signed by GitHub Actions and does not require a private signing key.
-            It is intended for direct installation and testing, not Google Play publishing.
+            This release-profile APK is signed with a temporary test key for direct installation.
+            It is not signed with a permanent private key and is not intended for Google Play publishing.
           files: artifacts/*.apk
